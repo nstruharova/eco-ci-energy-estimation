@@ -145,6 +145,19 @@ function cpu_vars_fill {
         add_var "CPU_FREQ" 2450;
         add_var "CPU_CHIPS" 1;
         add_var "VHOST_RATIO" $(echo "4/128" | bc -l);
+    
+    elif [[ "$model_name" == *"AMD Ryzen 9 7900X"* ]]; then 
+        echo "Found AMD Ryzen 9 7900X model";
+        add_var "MODEL_NAME" "RYZEN_9_7900X";
+
+        add_var "TDP" 170;
+        add_var "CPU_THREADS" 24;
+        add_var "CPU_CORES" 12;
+        add_var "CPU_MAKE" "amd";
+        add_var "RELEASE_YEAR" 2022;
+        add_var "RAM" 64;
+        add_var "CPU_FREQ" 4700;
+        add_var "CPU_CHIPS" 1;
 
     # gitlab uses this one
     elif [[ "$model_name" == *"AMD EPYC 7B12"* ]]; then
