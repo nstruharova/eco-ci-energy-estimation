@@ -24,6 +24,12 @@ function make_measurement() {
 
     # check wc -l of cpu-util is greater than 0
     if [[ $(wc -l < /tmp/eco-ci/cpu-util.txt) -gt 0 ]]; then
+        # capture time
+        time=$(($(date +%s) - $(cat /tmp/eco-ci/timer.txt)))
+
+        # capture cpu util
+        cat /tmp/eco-ci/cpu-util.txt > /tmp/eco-ci/cpu-util-temp.txt
+
         # if a previous venv is already active,
         if type deactivate &>/dev/null
         then
@@ -35,16 +41,16 @@ function make_measurement() {
         ## make a note that we cannot use --energy, skew the result as we do not have an input delay.
         # this works because demo-reporter is 1/second
         if [[ "$MODEL_NAME" == "unknown" ]]; then
-            cat /tmp/eco-ci/cpu-util.txt | python3 /tmp/eco-ci/spec-power-model/xgb.py --silent | tee -a /tmp/eco-ci/energy-total.txt > /tmp/eco-ci/energy.txt
+            cat /tmp/eco-ci/cpu-util-temp.txt | python3 /tmp/eco-ci/spec-power-model/xgb.py --silent | tee -a /tmp/eco-ci/energy-total.txt > /tmp/eco-ci/energy.txt
         elif [[ -n "$VHOST_RATIO" ]]; then
-            cat /tmp/eco-ci/cpu-util.txt | python3 /tmp/eco-ci/spec-power-model/xgb.py \
+            cat /tmp/eco-ci/cpu-util-temp.txt | python3 /tmp/eco-ci/spec-power-model/xgb.py \
             --tdp $TDP --cpu-threads $CPU_THREADS \
             --cpu-cores $CPU_CORES --cpu-make $CPU_MAKE \
             --release-year $RELEASE_YEAR --ram $RAM \
             --cpu-freq $CPU_FREQ --cpu-chips $CPU_CHIPS \
             --vhost-ratio $VHOST_RATIO --silent | tee -a /tmp/eco-ci/energy-total.txt > /tmp/eco-ci/energy.txt
         else
-            cat /tmp/eco-ci/cpu-util.txt | python3 /tmp/eco-ci/spec-power-model/xgb.py \
+            cat /tmp/eco-ci/cpu-util-temp.txt | python3 /tmp/eco-ci/spec-power-model/xgb.py \
             --tdp $TDP --cpu-threads $CPU_THREADS \
             --cpu-cores $CPU_CORES --cpu-make $CPU_MAKE \
             --release-year $RELEASE_YEAR --ram $RAM \
@@ -53,7 +59,7 @@ function make_measurement() {
         fi
 
         # now reset to old venv
-        deactivate 
+        deactivate
         # reactivate the old venv, if it was present
         if [[ $PREVIOUS_VENV != '' ]]; then
           source $PREVIOUS_VENV/bin/activate
@@ -71,10 +77,7 @@ function make_measurement() {
             label="Measurement #$MEASUREMENT_COUNT"
         fi
 
-        # this is the time in seconds that the measurement took
-        time=$(($(date +%s) - $(cat /tmp/eco-ci/timer.txt)))
-
-        cpu_avg=$(awk '{ total += $1; count++ } END { print total/count }' /tmp/eco-ci/cpu-util.txt)
+        cpu_avg=$(awk '{ total += $1; count++ } END { print total/count }' /tmp/eco-ci/cpu-util-temp.txt)
         total_energy=$(awk '{sum+=$1} END {print sum}' /tmp/eco-ci/energy.txt)
         power_avg=$(awk '{ total += $1; count++ } END { print total/count }' /tmp/eco-ci/energy.txt)
 
@@ -82,15 +85,19 @@ function make_measurement() {
         value_to_add="label:\"$label\", cpu_avg:$cpu_avg, total_energy:$total_energy, power_avg:$power_avg, time:$time"
         source "$(dirname "$0")/vars.sh" add_var $key_to_add "$value_to_add"
 
-        echo $total_energy >> /tmp/eco-ci/energy-values.txt 
+        echo $total_energy >> /tmp/eco-ci/energy-values.txt
         source "$(dirname "$0")/vars.sh" add_var MEASUREMENT_RAN true
 
-        if [[ $send_data == 'true' ]]; then
-            add_endpoint=$API_BASE"/v1/ci/measurement/add"
-            metrics_url="https://metrics.green-coding.io"
+        if [ -z "$cb_machine_uuid" ]; then
+             cb_machine_uuid=$(uuidgen)
+        fi
 
-            value=$total_energy
-            value_mJ=$(echo "$value*1000" | bc -l | cut -d '.' -f 1)
+        if [[ $send_data == 'true' ]]; then
+
+            source "$(dirname "$0")/vars.sh" get_co2 "$total_energy"
+
+            add_endpoint=$API_BASE"/v1/ci/measurement/add"
+            value_mJ=$(echo "$total_energy*1000" | bc -l | cut -d '.' -f 1)
             unit="mJ"
             model_name_uri=$(echo $MODEL_NAME | jq -Rr @uri)
 
@@ -108,9 +115,19 @@ function make_measurement() {
                 \"source\":\"$source\",
                 \"cpu_util_avg\":\"$cpu_avg\",
                 \"duration\":\"$time\",
-                \"workflow_name\":\"$workflow_name\"
+                \"workflow_name\":\"$workflow_name\",
+                \"cb_company_uuid\":\"$cb_company_uuid\",
+                \"cb_project_uuid\":\"$cb_project_uuid\",
+                \"cb_machine_uuid\":\"$cb_machine_uuid\",
+                \"lat\":\"${LAT:-""}\",
+                \"lon\":\"${LON:-""}\",
+                \"city\":\"${CITY:-""}\",
+                \"co2i\":\"${CO2I:-""}\",
+                \"co2eq\":\"${CO2EQ:-""}\"
             }"
         fi
+
+
 
         # write data to output
         lap_data_file="/tmp/eco-ci/lap-data.json"
@@ -124,12 +141,14 @@ function make_measurement() {
         source "$(dirname "$0")/create-and-add-meta.sh" --file "${lap_data_file}" --repository "${repo_enc}" --branch "${branch_enc}" --workflow "$WORKFLOW_ID" --run_id "${run_id_enc}"
         source "$(dirname "$0")/add-data.sh" --file "${lap_data_file}" --label "$label" --cpu "${cpu_avg}" --energy "${total_energy}" --power "${power_avg}" --time "${time}"
 
+        # reset timer and cpu capturing
         killall -9 -q /tmp/eco-ci/demo-reporter || true
         /tmp/eco-ci/demo-reporter | tee -a /tmp/eco-ci/cpu-util-total.txt > /tmp/eco-ci/cpu-util.txt &
         date +%s > /tmp/eco-ci/timer.txt
+
     else
         echo "Skipping measurement as no data was collected since last call"
-    fi  
+    fi
  }
 
 label=""
@@ -139,32 +158,35 @@ repo=""
 commit_hash=""
 send_data=""
 source=""
+cb_company_uuid=""
+cb_project_uuid=""
+cb_machine_uuid=""
 
 while [[ $# -gt 0 ]]; do
     opt="$1"
 
     case $opt in
-        -l|--label) 
+        -l|--label)
         label="$2"
         shift
         ;;
-        -r|--run-id) 
+        -r|--run-id)
         run_id="$2"
         shift
         ;;
-        -b|--branch) 
+        -b|--branch)
         branch="$2"
         shift
         ;;
-        -R|--repo) 
+        -R|--repo)
         repo="$2"
         shift
         ;;
-        -c|--commit) 
+        -c|--commit)
         commit_hash="$2"
         shift
         ;;
-        -sd|--send-data) 
+        -sd|--send-data)
         send_data="$2"
         shift
         ;;
@@ -176,8 +198,21 @@ while [[ $# -gt 0 ]]; do
         workflow_name="$2"
         shift
         ;;
-        \?) 
-        echo "Invalid option -$OPTARG" >&2
+        -cbc|--carbondbcompany)
+        cb_company_uuid="$2"
+        shift
+        ;;
+        -cbp|--carbondbproject)
+        cb_project_uuid="$2"
+        shift
+        ;;
+        -cbm|--carbondbmachine)
+        cb_machine_uuid="$2"
+        shift
+        ;;
+        *)
+        echo "Invalid option -$opt" >&2
+        exit 1
         ;;
     esac
     shift
